@@ -62,6 +62,7 @@ const el = {
   exportDetails:  $('exportDetails'),
   exportZoom:     $('exportZoom'),
   exportPad:      $('exportPad'),
+  exportTiers:    $('exportTiers'),
   exportBudget:   $('exportBudget'),
   exportName:     $('exportName'),
   btnExport:      $('btnExport'),
@@ -526,7 +527,13 @@ async function listKmz(garmin) {
   for await (const entry of dir.values()) {
     if (entry.kind !== 'file' || !/\.kmz$/i.test(entry.name)) continue;
     const file = await entry.getFile();
-    out.push({ name: entry.name, size: file.size });
+    out.push({
+      name:  entry.name,
+      size:  file.size,
+      mtime: file.lastModified,
+      path:  '/Garmin/CustomMaps/' + entry.name,
+      dir,                    // removeEntry() is a method on the parent
+    });
   }
   out.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
   return out;
@@ -565,13 +572,23 @@ function renderKmz(items) {
   for (const item of items) {
     const row = document.createElement('div');
     row.className = 'file';
+
     const name = document.createElement('span');
     name.className = 'name';
     name.textContent = item.name;                 // device-derived
+
     const size = document.createElement('span');
     size.className = 'size';
     size.textContent = formatBytes(item.size);
-    row.append(name, size);
+
+    const del = document.createElement('button');
+    del.className = 'small del';
+    del.textContent = 'delete';
+    del.style.marginLeft = '0';
+    del.title = 'Delete ' + item.path + ' from the device';
+    del.addEventListener('click', () => deleteKmz(item));
+
+    row.append(name, size, del);
     el.kmzList.append(row);
   }
 }
@@ -1188,60 +1205,93 @@ function decimate(points, max) {
   return out;
 }
 
-/* ── Delete a GPX from the device ───────────────────────────────────────
+/* ── Deleting files from the device ─────────────────────────────────────
  * There is no trash on a mass-storage volume: removeEntry() is immediate and
  * final, so this always confirms and never batches. */
-async function deleteGpx(entry) {
-  if (busy || !rootHandle) return;
-
-  const path = devicePath(entry);
+async function deleteDeviceFile(spec) {
+  if (busy || !rootHandle) return false;
 
   const lines = [
     'Delete this file from the device?',
     '',
-    '    ' + path,
-    '    ' + formatBytes(entry.size) + ', modified ' + formatDate(entry.mtime),
+    '    ' + spec.path,
+    '    ' + formatBytes(spec.size) + ', modified ' + formatDate(spec.mtime),
     '',
   ];
 
-  if (entry.where === 'Current') {
-    lines.push('WARNING: this is the active recording. If the device is still');
-    lines.push('logging, deleting it will discard the track in progress.');
-    lines.push('');
-  }
-
+  if (spec.warning) lines.push(...spec.warning, '');
   lines.push('This cannot be undone — the volume has no trash.');
-  lines.push('');
-  lines.push('Note: the eTrex imports GPX into internal storage, so the track');
-  lines.push('may still appear in Track Manager until the device is restarted.');
+  if (spec.note) lines.push('', ...spec.note);
 
   if (!confirm(lines.join('\n'))) {
-    log('Delete cancelled: ' + path);
-    return;
+    log('Delete cancelled: ' + spec.path);
+    return false;
   }
 
   busy = true;
   try {
-    await entry.dir.removeEntry(entry.name);
-    log('Deleted ' + path + ' (' + formatBytes(entry.size) + ')', 'ok');
-    setStatus('Deleted ' + entry.name, 'ok');
-
-    /* Don't leave the viewer showing a file that no longer exists. */
-    if (viewing === path) {
-      viewing = null;
-      el.viewerCard.hidden = true;
-      el.gpxTitle.textContent = '—';
-      el.gpxStats.textContent = '';
-      el.gpxNames.textContent = '';
-      el.gpxWarnings.textContent = '';
-      el.plot.textContent = '';
-    }
+    await spec.dir.removeEntry(spec.name);
+    log('Deleted ' + spec.path + ' (' + formatBytes(spec.size) + ')', 'ok');
+    setStatus('Deleted ' + spec.name, 'ok');
+    return true;
   } catch (err) {
-    fail('Could not delete ' + path, err);
-    return;
+    fail('Could not delete ' + spec.path, err);
+    return false;
   } finally {
     busy = false;
   }
+}
+
+async function deleteGpx(entry) {
+  const path = devicePath(entry);
+
+  const removed = await deleteDeviceFile({
+    path,
+    name:  entry.name,
+    size:  entry.size,
+    mtime: entry.mtime,
+    dir:   entry.dir,
+    warning: entry.where === 'Current' ? [
+      'WARNING: this is the active recording. If the device is still',
+      'logging, deleting it will discard the track in progress.',
+    ] : null,
+    note: [
+      'Note: the eTrex imports GPX into internal storage, so the track',
+      'may still appear in Track Manager until the device is restarted.',
+    ],
+  });
+  if (!removed) return;
+
+  /* Don't leave the viewer showing a file that no longer exists. */
+  if (viewing === path) {
+    viewing = null;
+    lastSegments = null;
+    el.viewerCard.hidden = true;
+    el.gpxTitle.textContent = '—';
+    el.gpxStats.textContent = '';
+    el.gpxNames.textContent = '';
+    el.gpxWarnings.textContent = '';
+    el.plot.textContent = '';
+    el.attrib.textContent = '';
+    refreshExportEstimate();
+  }
+
+  await scan();
+}
+
+async function deleteKmz(entry) {
+  const removed = await deleteDeviceFile({
+    path:  entry.path,
+    name:  entry.name,
+    size:  entry.size,
+    mtime: entry.mtime,
+    dir:   entry.dir,
+    note: [
+      'Note: custom maps are read at boot. Restart the eTrex for this to',
+      'disappear from Setup → Map.',
+    ],
+  });
+  if (!removed) return;
 
   await scan();
 }
@@ -1413,9 +1463,23 @@ function updateTransferButtons() {
  * Garmin stretches each overlay linearly between its LatLonBox edges, while
  * tiles are Mercator. Over one 1024 px block that mismatch peaks at ~5 cm at
  * z16 and ~21 cm at z15 — far below GPS error, so it is ignored here. */
-const CM_BLOCK = 4;                 // source tiles per output image edge (4×256 = 1024)
+const CM_BLOCK = 4;                 // source tiles per output image edge
 const CM_FETCH_CONCURRENCY = 6;
 const CM_JPEG_QUALITY = 0.75;
+
+/* Garmin caps a Custom Map image at one megapixel. A 4×4 block of 256 px tiles
+ * is 1024², which is 1.049 MP — just over. Each block is therefore composed at
+ * native resolution and then resampled once to 250 px per source tile, giving a
+ * 1000×1000 maximum: exactly 1 MP, at the cost of a 2.3% downscale. */
+const CM_PX_PER_TILE = 250;
+const CM_MAX_EDGE = CM_BLOCK * CM_PX_PER_TILE;   // 1000
+
+/* Custom Maps do not draw at every zoom: past roughly a 300 m scale the device
+ * stops rendering them and you drop back to the base map. The fix is to ship
+ * the same ground at several resolutions and let the device pick — coarser
+ * images stay renderable further out. drawOrder must exceed 50 to sit above
+ * Garmin's own maps, with finer imagery ordered above coarser. */
+const CM_DRAW_ORDER = [99, 89, 79, 69];
 
 /* Measured against real OpenTopoMap tiles: contour-and-hillshade art costs
  * roughly 420 KB per megapixel at q0.75, so a full 1024×1024 overlay tile lands
@@ -1439,29 +1503,61 @@ function paddedBounds(segments, padKm) {
   };
 }
 
-/** Source-tile range and output-block count for an extent at a zoom. */
-function customMapPlan(segments, z, padKm) {
-  const b = paddedBounds(segments, padKm);
-  const tx0 = Math.floor(lonToTileX(b.minLon, z));
-  const tx1 = Math.floor(lonToTileX(b.maxLon, z));
-  const ty0 = Math.floor(latToTileY(b.maxLat, z));
-  const ty1 = Math.floor(latToTileY(b.minLat, z));
+/** Full export plan: one extent, one fetch, several resolution tiers.
+ *
+ * Coarser tiers exist so the device still has something renderable when you
+ * zoom out — not to cover more ground. They are therefore built by downscaling
+ * the imagery already fetched at the top zoom, exactly as the multi-resolution
+ * Custom Map recipes do: every tier covers the *same* extent, each one blocking
+ * up 2× more source tiles per image and so landing at half the resolution.
+ *
+ * That costs no extra tile requests at all, and the image count falls away as
+ * 1 + 1/4 + 1/16, so three tiers is only about a third more images than one. */
+function customMapPlan(segments, topZoom, padKm, tiers) {
+  const bounds = paddedBounds(segments, padKm);
+  const midLat = ((bounds.minLat + bounds.maxLat) / 2) * Math.PI / 180;
+
+  const tx0 = Math.floor(lonToTileX(bounds.minLon, topZoom));
+  const tx1 = Math.floor(lonToTileX(bounds.maxLon, topZoom));
+  const ty0 = Math.floor(latToTileY(bounds.maxLat, topZoom));
+  const ty1 = Math.floor(latToTileY(bounds.minLat, topZoom));
 
   const cols = tx1 - tx0 + 1;
   const rows = ty1 - ty0 + 1;
-  const blocksX = Math.ceil(cols / CM_BLOCK);
-  const blocksY = Math.ceil(rows / CM_BLOCK);
-  const midLat = ((b.minLat + b.maxLat) / 2) * Math.PI / 180;
+  const baseMetresPerPixel =
+    (156543.03392 * Math.cos(midLat)) / Math.pow(2, topZoom) * (256 / CM_PX_PER_TILE);
+
+  const levels = [];
+  for (let i = 0; i < tiers; i++) {
+    const blockTiles = CM_BLOCK << i;               // 4, 8, 16 source tiles per image edge
+    const level = {
+      index: i,
+      blockTiles,
+      drawOrder: CM_DRAW_ORDER[Math.min(i, CM_DRAW_ORDER.length - 1)],
+      pxPerTile: CM_MAX_EDGE / blockTiles,          // 250, 125, 62.5
+      metresPerPixel: baseMetresPerPixel * Math.pow(2, i),
+      kmzTiles: Math.ceil(cols / blockTiles) * Math.ceil(rows / blockTiles),
+    };
+    levels.push(level);
+
+    /* Once one image spans the whole extent, halving again only reduces detail
+     * over the same ground — there is nothing coarser left worth shipping. */
+    if (level.kmzTiles === 1) break;
+  }
+
+  const kmzTiles = levels.reduce((n, l) => n + l.kmzTiles, 0);
+  const outputPixels = levels.reduce(
+    (n, l) => n + cols * l.pxPerTile * rows * l.pxPerTile, 0);
 
   return {
-    bounds: b, z, tx0, tx1, ty0, ty1, cols, rows,
-    sourceTiles: cols * rows,
-    kmzTiles: blocksX * blocksY,
-    blocksX, blocksY,
-    metresPerPixel: (156543.03392 * Math.cos(midLat)) / Math.pow(2, z),
-    estimatedBytes: cols * rows * 65536 / 1e6 * CM_KB_PER_MEGAPIXEL * 1024,
-    widthKm: (b.maxLon - b.minLon) * 111.320 * Math.cos(midLat),
-    heightKm: (b.maxLat - b.minLat) * 110.574,
+    bounds, levels, topZoom, tx0, tx1, ty0, ty1, cols, rows,
+    sourceTiles: cols * rows,                       // fetched once, shared by every tier
+    kmzTiles,
+    metresPerPixel: baseMetresPerPixel,
+    coarsestMetresPerPixel: levels[levels.length - 1].metresPerPixel,
+    estimatedBytes: outputPixels / 1e6 * CM_KB_PER_MEGAPIXEL * 1024,
+    widthKm: (bounds.maxLon - bounds.minLon) * 111.320 * Math.cos(midLat),
+    heightKm: (bounds.maxLat - bounds.minLat) * 110.574,
   };
 }
 
@@ -1599,7 +1695,8 @@ async function exportCustomMap() {
     return;
   }
 
-  const plan = customMapPlan(lastSegments, z, padKm);
+  const tiers = parseInt(el.exportTiers.value, 10) || 3;
+  const plan = customMapPlan(lastSegments, z, padKm, tiers);
 
   if (plan.kmzTiles > budget) {
     fail('This extent needs ' + plan.kmzTiles + ' Custom Map tiles, over the budget of ' +
@@ -1610,7 +1707,8 @@ async function exportCustomMap() {
   const proceed = confirm(
     'Build a Custom Map from ' + spec.label + ' imagery?\n\n' +
     '    area      ' + plan.widthKm.toFixed(1) + ' × ' + plan.heightKm.toFixed(1) + ' km\n' +
-    '    detail    z' + z + ', ' + plan.metresPerPixel.toFixed(1) + ' m/pixel\n' +
+    '    tiers     ' + plan.levels.length + '  (' + plan.metresPerPixel.toFixed(1) +
+    ' to ' + plan.coarsestMetresPerPixel.toFixed(1) + ' m/pixel)\n' +
     '    requests  ' + plan.sourceTiles + ' tiles from ' + spec.label + '\n' +
     '    result    ' + plan.kmzTiles + ' overlay tile(s), about ' + formatBytes(plan.estimatedBytes) + '\n' +
     '              → /Garmin/CustomMaps/' + name + '\n\n' +
@@ -1624,13 +1722,14 @@ async function exportCustomMap() {
   el.exportBar.style.width = '0%';
 
   try {
-    /* 1 — fetch every source tile. */
+    /* 1 — fetch the source grid once; every tier is built from it. */
     const wanted = [];
     for (let ty = plan.ty0; ty <= plan.ty1; ty++) {
       for (let tx = plan.tx0; tx <= plan.tx1; tx++) wanted.push({ tx, ty });
     }
 
-    log('Custom Map: fetching ' + wanted.length + ' tile(s) from ' + spec.label + ' at z' + z + '…');
+    log('Custom Map: fetching ' + wanted.length + ' tile(s) from ' + spec.label +
+        ' at z' + z + ', for ' + plan.levels.length + ' resolution tier(s)…');
 
     const worldTiles = Math.pow(2, z);
     const bitmaps = new Map();
@@ -1660,45 +1759,62 @@ async function exportCustomMap() {
     }
 
     /* 2 — stitch into ≤1024×1024 JPEGs and collect their georeferencing. */
-    const canvas = document.createElement('canvas');
-    const ctx = canvas.getContext('2d');
+    const compose = document.createElement('canvas');       // native 256 px composition
+    const composeCtx = compose.getContext('2d');
+    const output = document.createElement('canvas');        // resampled, ≤1 MP
+    const outputCtx = output.getContext('2d');
+    outputCtx.imageSmoothingQuality = 'high';
+
     const overlays = [];
     const members = [];
     let built = 0;
 
-    for (let by = plan.ty0; by <= plan.ty1; by += CM_BLOCK) {
-      for (let bx = plan.tx0; bx <= plan.tx1; bx += CM_BLOCK) {
-        const cols = Math.min(CM_BLOCK, plan.tx1 - bx + 1);
-        const rows = Math.min(CM_BLOCK, plan.ty1 - by + 1);
+    for (const level of plan.levels) {
+      const step = level.blockTiles;
 
-        canvas.width = cols * 256;
-        canvas.height = rows * 256;
-        ctx.fillStyle = '#ffffff';
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
+      for (let by = plan.ty0; by <= plan.ty1; by += step) {
+        for (let bx = plan.tx0; bx <= plan.tx1; bx += step) {
+          const cols = Math.min(step, plan.tx1 - bx + 1);
+          const rows = Math.min(step, plan.ty1 - by + 1);
 
-        for (let j = 0; j < rows; j++) {
-          for (let i = 0; i < cols; i++) {
-            const bitmap = bitmaps.get((bx + i) + ',' + (by + j));
-            if (bitmap) ctx.drawImage(bitmap, i * 256, j * 256);
+          compose.width = cols * 256;
+          compose.height = rows * 256;
+          composeCtx.fillStyle = '#ffffff';
+          composeCtx.fillRect(0, 0, compose.width, compose.height);
+
+          for (let j = 0; j < rows; j++) {
+            for (let i = 0; i < cols; i++) {
+              const bitmap = bitmaps.get((bx + i) + ',' + (by + j));
+              if (bitmap) composeCtx.drawImage(bitmap, i * 256, j * 256);
+            }
           }
+
+          /* One resample of the assembled block, rather than per tile — scaling
+           * each tile separately would resample across its edges and seam. */
+          output.width = Math.max(1, Math.round(cols * level.pxPerTile));
+          output.height = Math.max(1, Math.round(rows * level.pxPerTile));
+          outputCtx.drawImage(compose, 0, 0, compose.width, compose.height,
+                                       0, 0, output.width, output.height);
+
+          const blob = await canvasToJpeg(output, CM_JPEG_QUALITY);
+          const file = 'tiles/L' + level.index + '_' + (bx - plan.tx0) + '_' + (by - plan.ty0) + '.jpg';
+          members.push({ name: file, bytes: new Uint8Array(await blob.arrayBuffer()) });
+
+          overlays.push({
+            href: file,
+            drawOrder: level.drawOrder,
+            label: level.metresPerPixel.toFixed(1) + ' m/px',
+            north: tileYToLat(by, z),
+            south: tileYToLat(by + rows, z),
+            west:  tileXToLon(bx, z),
+            east:  tileXToLon(bx + cols, z),
+          });
+
+          built++;
+          const pct = 70 + (built / plan.kmzTiles) * 25;
+          el.exportBar.style.width = pct.toFixed(1) + '%';
+          el.exportText.textContent = 'building overlays  ' + built + ' / ' + plan.kmzTiles;
         }
-
-        const blob = await canvasToJpeg(canvas, CM_JPEG_QUALITY);
-        const file = 'tiles/t_' + (bx - plan.tx0) + '_' + (by - plan.ty0) + '.jpg';
-        members.push({ name: file, bytes: new Uint8Array(await blob.arrayBuffer()) });
-
-        overlays.push({
-          href: file,
-          north: tileYToLat(by, z),
-          south: tileYToLat(by + rows, z),
-          west:  tileXToLon(bx, z),
-          east:  tileXToLon(bx + cols, z),
-        });
-
-        built++;
-        const pct = 70 + (built / plan.kmzTiles) * 25;
-        el.exportBar.style.width = pct.toFixed(1) + '%';
-        el.exportText.textContent = 'building overlays  ' + built + ' / ' + plan.kmzTiles;
       }
     }
 
@@ -1711,13 +1827,14 @@ async function exportCustomMap() {
       '<kml xmlns="http://www.opengis.net/kml/2.2">',
       '  <Document>',
       '    <name>' + xmlEscape(title) + '</name>',
-      '    <description>' + xmlEscape(spec.label + ' z' + z + ' — built by eTrex Bridge') + '</description>',
+      '    <description>' + xmlEscape(spec.label + ' z' + z + ', ' + plan.levels.length +
+            ' resolution tier(s) — built by eTrex Bridge') + '</description>',
     ];
     overlays.forEach((o, i) => {
       kml.push(
         '    <GroundOverlay>',
-        '      <name>' + xmlEscape(title + ' ' + (i + 1)) + '</name>',
-        '      <drawOrder>50</drawOrder>',
+        '      <name>' + xmlEscape(title + ' ' + o.label + ' ' + (i + 1)) + '</name>',
+        '      <drawOrder>' + o.drawOrder + '</drawOrder>',
         '      <Icon><href>' + xmlEscape(o.href) + '</href></Icon>',
         '      <LatLonBox>',
         '        <north>' + o.north.toFixed(9) + '</north>',
@@ -1751,8 +1868,9 @@ async function exportCustomMap() {
     el.exportBar.style.width = '100%';
     el.exportText.textContent = formatBytes(kmz.size) + ' written';
     log('Custom Map written: /Garmin/CustomMaps/' + name + ' — ' + plan.kmzTiles +
-        ' overlay tile(s), ' + formatBytes(kmz.size) + ', z' + z + ' (' +
-        plan.metresPerPixel.toFixed(1) + ' m/px).', 'ok');
+        ' overlay tile(s) across ' + plan.levels.length + ' tier(s), ' +
+        formatBytes(kmz.size) + ', ' + plan.metresPerPixel.toFixed(1) + '–' +
+        plan.coarsestMetresPerPixel.toFixed(1) + ' m/px.', 'ok');
     setStatus('Custom Map installed. Restart the eTrex, then enable it under Setup → Map.', 'ok');
 
     await scan();
@@ -1774,15 +1892,18 @@ function refreshExportEstimate() {
   const z = parseInt(el.exportZoom.value, 10);
   const padKm = parseFloat(el.exportPad.value);
   const budget = Math.max(1, Math.min(500, parseInt(el.exportBudget.value, 10) || 100));
-  const plan = customMapPlan(lastSegments, z, padKm);
+  const tiers = parseInt(el.exportTiers.value, 10) || 3;
+  const plan = customMapPlan(lastSegments, z, padKm, tiers);
 
   const over = plan.kmzTiles > budget;
   el.exportEstimate.className = over ? 'notice' : 'muted';
   el.exportEstimate.textContent =
-    plan.widthKm.toFixed(1) + ' × ' + plan.heightKm.toFixed(1) + ' km at ' +
-    plan.metresPerPixel.toFixed(1) + ' m/px · ' + plan.sourceTiles + ' tile request(s) · ' +
+    plan.widthKm.toFixed(1) + ' × ' + plan.heightKm.toFixed(1) + ' km · ' +
+    plan.levels.length + ' tier(s) (' +
+    plan.metresPerPixel.toFixed(1) + '–' + plan.coarsestMetresPerPixel.toFixed(1) + ' m/px) · ' +
+    plan.sourceTiles + ' tile request(s) · ' +
     plan.kmzTiles + ' of ' + budget + ' overlay tiles · ~' + formatBytes(plan.estimatedBytes) +
-    (over ? ' — over budget. Lower the detail or trim the margin.' : '');
+    (over ? ' — over budget. Lower the detail, fewer levels, or trim the margin.' : '');
 
   el.btnExport.disabled = over || !rootHandle || !safeKmzName(el.exportName.value);
 }
@@ -1863,7 +1984,7 @@ async function init() {
   el.basemap.addEventListener('change', onMapControlChange);
 
   el.btnExport.addEventListener('click', exportCustomMap);
-  for (const control of [el.exportZoom, el.exportPad, el.exportBudget, el.exportName]) {
+  for (const control of [el.exportZoom, el.exportPad, el.exportTiers, el.exportBudget, el.exportName]) {
     control.addEventListener('input', refreshExportEstimate);
     control.addEventListener('change', refreshExportEstimate);
   }

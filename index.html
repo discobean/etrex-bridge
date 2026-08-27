@@ -98,6 +98,12 @@
       <code>GroundOverlay</code> georeferencing each one. This is the only way the
       eTrex will display raster imagery. It is an overlay, not a routable map.
     </p>
+    <p class="muted">
+      Custom maps stop drawing once you zoom out past roughly a 300&nbsp;m scale. Exporting
+      several zoom levels ships the same ground at coarser resolutions too, so the device
+      has something it can still render as you zoom out. Three levels costs only about a
+      third more tiles than one.
+    </p>
     <div class="row">
       <label for="exportZoom">Detail</label>
       <select id="exportZoom">
@@ -110,6 +116,12 @@
         <option value="0.5">0.5 km</option>
         <option value="1" selected>1 km</option>
         <option value="2">2 km</option>
+      </select>
+      <label for="exportTiers">Zoom levels</label>
+      <select id="exportTiers">
+        <option value="1">1 — sharpest only</option>
+        <option value="2">2</option>
+        <option value="3" selected>3 — stays visible zoomed out</option>
       </select>
       <label for="exportBudget">Tile budget</label>
       <input type="number" id="exportBudget" min="1" max="500" value="100" step="1">

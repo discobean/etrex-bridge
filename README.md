@@ -99,14 +99,19 @@ The file is validated as well-formed XML with a `<gpx>` root *before* anything i
 written, you are warned if it breaches a firmware ceiling, and asked to confirm
 if it would overwrite an existing file.
 
-### Delete a GPX
+### Delete a GPX or a custom map
 
-Click **delete** on any row. The confirmation names the full device path, size
-and mtime, and warns separately if the target is the active recording in
-`GPX/Current/`. There is no trash on the volume — this is immediate and final.
+Click **delete** on any row under **GPX files** or **Custom maps**. The
+confirmation names the full device path, size and mtime. There is no trash on
+the volume — this is immediate and final.
 
-Note the eTrex *imports* GPX into internal storage rather than reading it live,
-so a deleted track may still appear in Track Manager until the device restarts.
+Both kinds warn that the device reads these at boot, so a deletion may not show
+up until the eTrex restarts: a deleted track can linger in Track Manager, and a
+deleted `.kmz` in **Setup → Map**. Deleting the active recording in
+`GPX/Current/` carries an extra warning, since that discards a track still being
+logged.
+
+Deleting the GPX currently open in the viewer clears the viewer too.
 
 ### Install a vector map
 
@@ -121,11 +126,16 @@ The file is streamed chunk-by-chunk, so a 1 GB+ image is never held in memory.
 
 1. Open a GPX so the viewer has a track.
 2. Expand **Export this area as a Garmin Custom Map (KMZ)**.
-3. Pick a detail level and margin. The estimate line shows the area, the number
-   of tile requests, the overlay-tile count against your budget, and the
-   approximate size — all before anything is downloaded.
+3. Pick a detail level, margin and number of zoom levels. The estimate line
+   shows the area, the resolution range, the tile requests, the overlay-image
+   count against your budget, and the approximate size — all before anything is
+   downloaded.
 4. Click **Write KMZ to device**.
 5. Restart the eTrex and enable it under **Setup → Map**.
+
+Leave **Zoom levels** at 3 unless you have a reason not to — custom maps stop
+drawing when you zoom out, and the extra tiers are what keep them visible. They
+cost no extra downloads.
 
 ---
 
@@ -232,12 +242,44 @@ georeferencing each. The exporter fetches basemap tiles for the open track's
 extent, stitches them into ≤1024×1024 JPEGs, writes the KML, zips it, and streams
 it to the device.
 
-Typical handheld limits are around **100 overlay tiles of at most 1024×1024 px
-each**, JPEG only, drawn over the base map and not routable. The exporter has a
-tile-budget field (default 100) and refuses to exceed it — check your model's own
-limit, as these vary and are **not verified here**.
+Typical handheld limits are around **100 overlay tiles**, JPEG only, drawn over
+the base map and not routable. The exporter has a tile-budget field (default 100)
+and refuses to exceed it — check your model's own limit, as these vary.
 
-Scale, measured from real hiking tracks:
+#### Custom maps vanish when you zoom out
+
+This catches people out. Unlike BirdsEye imagery, custom maps **do not draw at
+every zoom**: past roughly a 300 m scale the device stops rendering them and you
+drop back to the base map. It is a function of the image's ground resolution —
+finely detailed imagery is only renderable when zoomed right in.
+
+The fix is to ship the same ground at **several resolutions** and let the device
+pick whichever it can still draw. The **Zoom levels** control does this, and
+defaults to 3.
+
+Coarser tiers are built by downscaling the imagery already fetched for the
+sharpest tier, so they cost **no extra tile requests at all** — only extra
+images, and those fall away as 1 + ¼ + ¹⁄₁₆:
+
+| Tiers | Requests | Overlay images | Size | Resolution range |
+|---|---|---|---|---|
+| 1 | 72 | 6 | ~1.85 MB | 2.0 m/px |
+| 2 | 72 | 8 | ~2.31 MB | 2.0 – 4.1 m/px |
+| 3 | 72 | 9 | ~2.42 MB | 2.0 – 8.1 m/px |
+
+Every tier covers an identical extent; only the resolution changes.
+`drawOrder` is 99 / 89 / 79 — above 50 so they sit over Garmin's own maps, with
+finer imagery ordered above coarser.
+
+#### The one-megapixel cap
+
+Garmin caps a Custom Map image at **one megapixel**. A 4×4 block of 256 px tiles
+is 1024², which is 1.049 MP — just over. Each block is therefore composed at
+native resolution and resampled once to **1000×1000**, exactly at the cap, at the
+cost of a 2.3% downscale. Verified: no image the exporter produces exceeds
+1.000 MP.
+
+Scale, measured from real hiking tracks (single tier):
 
 | Extent | Detail | Requests | Overlay tiles | Size |
 |---|---|---|---|---|
@@ -307,9 +349,11 @@ independent implementation with round-trip error near 1e-14.
 
 ### The Custom Map export
 
-- **Alignment.** Overlay tiles are cut on 4×4 blocks of source tiles, so imagery
-  is copied at native resolution with no resampling, and each block's
-  `LatLonBox` comes straight from the inverse Mercator of its edges.
+- **Alignment.** Overlay tiles are cut on blocks of source tiles — 4×4 for the
+  sharpest tier, 8×8 and 16×16 for the coarser ones — and each block's
+  `LatLonBox` comes straight from the inverse Mercator of its edges. Blocks are
+  composed at native 256 px and resampled once as a whole, rather than scaling
+  each tile individually, which would resample across tile edges and seam.
 - **Projection error.** Garmin stretches each overlay linearly between its
   `LatLonBox` edges, while tiles are Mercator. Over one 1024 px block the
   mismatch peaks at **5 cm at z16** and 21 cm at z15 — far below GPS error.
@@ -406,9 +450,9 @@ untouched.
   with `textContent` only.
 - **Confirm before overwriting** `gmapsupp.img`, an existing GPX, or an existing
   KMZ.
-- **Confirm before deleting.** `removeEntry()` is immediate and final. The prompt
-  names the full path, size and mtime, and warns separately for the active
-  recording.
+- **Confirm before deleting.** `removeEntry()` is immediate and final, for both
+  GPX files and custom maps. The prompt names the full path, size and mtime, and
+  warns separately for the active recording.
 - **Warn on firmware ceilings** before an upload, with a chance to cancel.
 
 ---
@@ -436,8 +480,10 @@ untouched.
 | Reconnect fails | The volume was unmounted or relabelled. Use **Connect volume…**. |
 | Status says permission lapsed | Chrome dropped the grant. Click **Reconnect**. |
 | Basemap tiles blank | Offline, or the tile server declined. The log says which. The track still draws. |
-| Export refuses to run | Over the tile budget. Lower the detail, trim the margin, or raise the budget. |
+| Export refuses to run | Over the tile budget. Lower the detail, use fewer zoom levels, trim the margin, or raise the budget. |
+| Custom map vanishes when zoomed out | Expected — export more zoom levels. See above. |
 | Uploaded track missing on device | The eTrex imports GPX at boot — restart it. |
+| Deleted map still in Setup → Map | Custom maps are also read at boot — restart it. |
 
 ---
 
