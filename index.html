@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>eTrex Bridge</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header class="topbar">
+  <h1>eTrex Bridge</h1>
+  <p class="sub">Direct USB mass-storage access to a Garmin eTrex 30x via the File System Access API.</p>
+</header>
+
+<main>
+
+<!-- ── Support gate ─────────────────────────────────────────────── -->
+<section id="unsupported" class="card danger" hidden>
+  <h2>This browser can't do it</h2>
+  <p id="unsupportedWhy"></p>
+  <p class="muted">
+    The File System Access API's <code>showDirectoryPicker()</code> is Chromium-only
+    (Chrome, Edge, Opera, Brave, Arc). Firefox and Safari implement only the
+    origin-private filesystem, which is a sandbox inside the browser profile — it
+    cannot reach a mounted USB volume. The page must also be served from
+    <code>https://</code> or <code>http://localhost</code>; <code>file://</code> has an
+    opaque origin and the API is not exposed there.
+  </p>
+</section>
+
+<!-- ── Connection ───────────────────────────────────────────────── -->
+<section id="connectCard" class="card" hidden>
+  <h2>Device</h2>
+  <p class="muted">
+    Plug the eTrex in and wait for the volumes to mount. It presents two:
+    <strong>GARMIN</strong> (internal, ~3.7&nbsp;GB) and the microSD card. Pick one below.
+    There is no plug-in event for mass storage and volumes can't be enumerated, so a
+    click is required once per session.
+  </p>
+  <div class="row">
+    <button id="btnConnect" class="primary">Connect volume…</button>
+    <button id="btnReconnect" hidden>Reconnect <span id="reconnectName" class="chip"></span></button>
+    <button id="btnRefresh" disabled>Refresh</button>
+    <button id="btnForget" hidden class="ghost">Forget</button>
+  </div>
+  <div id="status" class="status idle">Not connected</div>
+</section>
+
+<!-- ── Inventory ────────────────────────────────────────────────── -->
+<section id="inventoryCard" class="card" hidden>
+  <h2>Inventory</h2>
+
+  <h3>Map image</h3>
+  <div id="mapInfo" class="kv muted">—</div>
+
+  <h3>Custom maps <span class="muted">/Garmin/CustomMaps</span></h3>
+  <div id="kmzList" class="filelist muted">—</div>
+
+  <h3>GPX files</h3>
+  <div id="gpxList" class="filelist muted">—</div>
+
+  <h3>Everything under <span class="muted">/Garmin</span></h3>
+  <details id="treeDetails">
+    <summary id="treeSummary">Show the full tree</summary>
+    <div id="tree" class="tree muted">—</div>
+  </details>
+</section>
+
+<!-- ── GPX viewer ───────────────────────────────────────────────── -->
+<section id="viewerCard" class="card" hidden>
+  <h2>GPX viewer</h2>
+  <div id="gpxTitle" class="filename">—</div>
+  <div id="gpxStats" class="stats"></div>
+  <div id="gpxNames"></div>
+  <div id="gpxWarnings"></div>
+
+  <div class="row maprow">
+    <label class="check">
+      <input type="checkbox" id="tilesToggle" checked> Terrain basemap
+    </label>
+    <select id="basemap">
+      <option value="opentopo">OpenTopoMap — contours + hillshading</option>
+      <option value="cyclosm">CyclOSM — outdoor detail</option>
+      <option value="osm">OpenStreetMap — standard</option>
+    </select>
+    <span class="muted" id="mapNote"></span>
+  </div>
+
+  <div id="plot" class="plot"></div>
+  <div id="attrib" class="attrib"></div>
+
+  <details id="exportDetails">
+    <summary>Export this area as a Garmin Custom Map (KMZ)</summary>
+    <p class="muted">
+      Writes the basemap imagery for this track's extent to
+      <code>/Garmin/CustomMaps/</code> as a KMZ — JPEG tiles plus a KML
+      <code>GroundOverlay</code> georeferencing each one. This is the only way the
+      eTrex will display raster imagery. It is an overlay, not a routable map.
+    </p>
+    <div class="row">
+      <label for="exportZoom">Detail</label>
+      <select id="exportZoom">
+        <option value="14">z14 — ~8 m/px</option>
+        <option value="15" selected>z15 — ~4 m/px</option>
+        <option value="16">z16 — ~2 m/px</option>
+      </select>
+      <label for="exportPad">Margin</label>
+      <select id="exportPad">
+        <option value="0.5">0.5 km</option>
+        <option value="1" selected>1 km</option>
+        <option value="2">2 km</option>
+      </select>
+      <label for="exportBudget">Tile budget</label>
+      <input type="number" id="exportBudget" min="1" max="500" value="100" step="1">
+    </div>
+    <div class="row">
+      <label for="exportName">Save as</label>
+      <input type="text" id="exportName" maxlength="68" spellcheck="false"
+             autocomplete="off" autocapitalize="off">
+      <button id="btnExport" disabled>Write KMZ to device</button>
+    </div>
+    <div id="exportEstimate"></div>
+    <div id="exportProgressWrap" hidden>
+      <div class="progress"><div id="exportBar"></div></div>
+      <div id="exportText" class="muted mono">—</div>
+    </div>
+  </details>
+</section>
+
+<!-- ── Transfers ────────────────────────────────────────────────── -->
+<section id="transferCard" class="card" hidden>
+  <h2>Transfer</h2>
+
+  <h3>Upload GPX <span class="muted">→ /Garmin/GPX/</span></h3>
+  <p class="muted">
+    Validated as well-formed XML with a <code>&lt;gpx&gt;</code> root before anything is
+    written. Filenames are checked against
+    <code>/^[A-Za-z0-9 ._-]{1,64}\.gpx$/i</code>.
+  </p>
+  <div class="row">
+    <input type="file" id="gpxInput" accept=".gpx,application/gpx+xml">
+    <button id="btnUpload" disabled>Upload to device</button>
+  </div>
+  <div class="row" id="renameRow" hidden>
+    <label for="gpxName">Save on device as</label>
+    <input type="text" id="gpxName" maxlength="68" spellcheck="false" autocomplete="off"
+           autocapitalize="off" aria-describedby="nameHint">
+    <button id="btnResetName" class="ghost small" style="margin-left:0">suggest</button>
+  </div>
+  <div id="nameHint"></div>
+
+  <h3>Install map <span class="muted">→ /Garmin/gmapsupp.img</span></h3>
+  <p class="muted">
+    Streamed chunk-by-chunk — a 1&nbsp;GB+ image is never held in memory. This replaces
+    the map currently on the device.
+  </p>
+  <div class="row">
+    <input type="file" id="imgInput" accept=".img">
+    <button id="btnInstall" disabled>Install map</button>
+  </div>
+  <div id="progressWrap" hidden>
+    <div class="progress"><div id="progressBar"></div></div>
+    <div id="progressText" class="muted mono">—</div>
+  </div>
+</section>
+
+<!-- ── Log ──────────────────────────────────────────────────────── -->
+<section class="card">
+  <h2>Log <button id="btnClearLog" class="ghost small">clear</button></h2>
+  <div id="log" class="log" role="log" aria-live="polite"></div>
+</section>
+
+</main>
+
+<footer class="muted">
+  Device ceilings — 2000 waypoints · 200 routes · 200 saved tracks · 10000 points per track.
+  The firmware truncates silently past these.
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>
