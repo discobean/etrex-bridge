@@ -396,7 +396,7 @@ async function scan() {
       setStatus('Connected to "' + rootHandle.name +
         '" — no /Garmin folder here. That is normal for a blank card; it will be created on first write.', 'warn');
       log('No /Garmin folder on ' + rootHandle.name, 'warn');
-      renderMapInfo(null);
+      renderMapInfo(null, null);
       renderKmz([]);
       renderGpxList([]);
       renderTree([]);
@@ -406,7 +406,7 @@ async function scan() {
     setStatus('Connected to "' + rootHandle.name + '" — /Garmin found.', 'ok');
 
     const imgHandle = await tryGetFile(garmin, 'gmapsupp.img');
-    renderMapInfo(imgHandle ? await imgHandle.getFile() : null);
+    renderMapInfo(imgHandle ? await imgHandle.getFile() : null, garmin);
 
     renderKmz(await listKmz(garmin));
 
@@ -540,14 +540,16 @@ async function listKmz(garmin) {
 }
 
 /* ── Inventory rendering ────────────────────────────────────────────── */
-function renderMapInfo(file) {
+function renderMapInfo(file, garminDir) {
   el.mapInfo.textContent = '';
   el.mapInfo.classList.toggle('muted', !file);
 
   if (!file) {
-    el.mapInfo.textContent = 'No /Garmin/gmapsupp.img on this volume.';
+    el.mapInfo.textContent =
+      'No /Garmin/gmapsupp.img on this volume — the device falls back to its built-in firmware basemap.';
     return;
   }
+
   const rows = [
     ['Path',     '/Garmin/gmapsupp.img'],
     ['Size',     formatBytes(file.size) + '  (' + file.size.toLocaleString() + ' bytes)'],
@@ -560,6 +562,26 @@ function renderMapInfo(file) {
     row.append(kn, vn);
     el.mapInfo.append(row);
   }
+
+  if (!garminDir) return;
+
+  const actions = document.createElement('div');
+  actions.className = 'row';
+
+  const del = document.createElement('button');
+  del.className = 'small del';
+  del.textContent = 'delete map';
+  del.style.marginLeft = '0';
+  del.title = 'Delete /Garmin/gmapsupp.img, freeing ' + formatBytes(file.size);
+  del.addEventListener('click', () => deleteMap(file, garminDir));
+
+  const hint = document.createElement('span');
+  hint.className = 'muted';
+  hint.textContent = 'Frees ' + formatBytes(file.size) +
+    ' — do this first if the volume cannot hold the old and new map at once.';
+
+  actions.append(del, hint);
+  el.mapInfo.append(actions);
 }
 
 function renderKmz(items) {
@@ -1276,6 +1298,36 @@ async function deleteGpx(entry) {
     refreshExportEstimate();
   }
 
+  await scan();
+}
+
+/* Deleting the installed map is mostly a way to make room.
+ *
+ * createWritable() writes a .crswap beside the target and renames on close, so
+ * replacing a map needs space for both at once. On a volume that cannot hold
+ * two, removing the old one first is the only way through — at the cost of the
+ * rollback that swap-and-rename would otherwise give you. */
+async function deleteMap(file, garminDir) {
+  const removed = await deleteDeviceFile({
+    path:  '/Garmin/gmapsupp.img',
+    name:  'gmapsupp.img',
+    size:  file.size,
+    mtime: file.lastModified,
+    dir:   garminDir,
+    warning: [
+      'This is the installed map. Until you install another, the device',
+      'falls back to its built-in firmware basemap — coastlines and major',
+      'roads, no contours.',
+    ],
+    note: [
+      'Deleting first is how you install a replacement when the volume cannot',
+      'hold both: a map install needs room for the old and new files at once.',
+      'You will have no map on the device until the new one finishes writing.',
+    ],
+  });
+  if (!removed) return;
+
+  log('Freed ' + formatBytes(file.size) + ' — install the replacement before unplugging.', 'ok');
   await scan();
 }
 

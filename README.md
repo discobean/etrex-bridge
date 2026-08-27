@@ -99,6 +99,19 @@ The file is validated as well-formed XML with a `<gpx>` root *before* anything i
 written, you are warned if it breaches a firmware ceiling, and asked to confirm
 if it would overwrite an existing file.
 
+### Delete the installed map
+
+The **Map image** panel has a **delete map** button when a `gmapsupp.img` is
+present, showing how much it would free.
+
+This exists to make room. `createWritable()` writes a `.crswap` beside the
+target and renames on close, so replacing a map needs space for **both at once**
+— 1.67 GB + 1.67 GB is ~3.34 GB on a 3.7 GB volume, which is tight enough to
+fail mid-write. Deleting first is the way through, at the cost of the rollback
+that swap-and-rename would otherwise give you. Between the delete and the end of
+the next install the device has only its firmware basemap, so do not unplug in
+between.
+
 ### Delete a GPX or a custom map
 
 Click **delete** on any row under **GPX files** or **Custom maps**. The
@@ -224,7 +237,8 @@ map**.
 existing map**, though, `createWritable()` needs room only for the new file, so
 1.67 GB fits a 3.7 GB internal volume with ~2 GB to spare. The problem is
 *replacing* it later: old + new peaks at ~3.34 GB, which is genuinely tight and
-can fail mid-write. Delete the existing `gmapsupp.img` first if you hit that.
+can fail mid-write. Use **delete map** first if you hit that — see
+[Delete the installed map](#delete-the-installed-map).
 
 Maps are **CC-BY-NC-SA 4.0** — non-commercial, share-alike, not for resale.
 
@@ -450,9 +464,10 @@ untouched.
   with `textContent` only.
 - **Confirm before overwriting** `gmapsupp.img`, an existing GPX, or an existing
   KMZ.
-- **Confirm before deleting.** `removeEntry()` is immediate and final, for both
-  GPX files and custom maps. The prompt names the full path, size and mtime, and
-  warns separately for the active recording.
+- **Confirm before deleting.** `removeEntry()` is immediate and final, for GPX
+  files, custom maps and the installed `gmapsupp.img`. The prompt names the full
+  path, size and mtime, and warns separately for the active recording and for
+  the installed map.
 - **Warn on firmware ceilings** before an upload, with a chance to cancel.
 
 ---
@@ -484,6 +499,7 @@ untouched.
 | Custom map vanishes when zoomed out | Expected — export more zoom levels. See above. |
 | Uploaded track missing on device | The eTrex imports GPX at boot — restart it. |
 | Deleted map still in Setup → Map | Custom maps are also read at boot — restart it. |
+| Map install fails part-way | Not enough room for old + new at once. Use **delete map** first. |
 
 ---
 
